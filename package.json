@@ -10,6 +10,7 @@
   "dependencies": {
     "telegraf": "^4.16.3",
     "better-sqlite3": "^11.3.0",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
   }
 }
