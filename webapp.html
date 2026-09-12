@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Кошелёк</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #0f0f14);
+    --text: var(--tg-theme-text-color, #ffffff);
+    --hint: var(--tg-theme-hint-color, #8a8a93);
+    --button: var(--tg-theme-button-color, #5b7fff);
+    --button-text: var(--tg-theme-button-text-color, #ffffff);
+    --card: #1a1a22;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  .balance-card {
+    background: linear-gradient(135deg, #5b7fff, #8a5bff);
+    border-radius: 20px;
+    padding: 24px;
+    margin-bottom: 20px;
+  }
+
+  .balance-label {
+    font-size: 14px;
+    opacity: 0.85;
+    margin-bottom: 6px;
+  }
+
+  .balance-amount {
+    font-size: 40px;
+    font-weight: 700;
+  }
+
+  .username-tag {
+    font-size: 13px;
+    opacity: 0.85;
+    margin-top: 8px;
+  }
+
+  .actions {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+
+  .action-btn {
+    flex: 1;
+    background: var(--card);
+    border: none;
+    border-radius: 14px;
+    padding: 16px 8px;
+    color: var(--text);
+    font-size: 14px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+  }
+
+  .action-btn .icon { font-size: 22px; }
+
+  .section-title {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 20px 0 10px;
+  }
+
+  .history-item {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 14px;
+    margin-bottom: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .history-item .left { display: flex; flex-direction: column; }
+  .history-item .who { font-size: 14px; }
+  .history-item .when { font-size: 12px; color: var(--hint); margin-top: 2px; }
+  .history-item .amount { font-size: 16px; font-weight: 600; }
+  .amount.out { color: #ff6b6b; }
+  .amount.in { color: #4cd97b; }
+
+  .empty-state {
+    text-align: center;
+    color: var(--hint);
+    padding: 30px 0;
+    font-size: 14px;
+  }
+
+  /* Модальное окно отправки */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    align-items: flex-end;
+    justify-content: center;
+    z-index: 100;
+  }
+  .modal-overlay.open { display: flex; }
+
+  .modal {
+    background: var(--bg);
+    border-radius: 20px 20px 0 0;
+    padding: 24px 20px 32px;
+    width: 100%;
+    max-width: 480px;
+  }
+
+  .modal h3 { margin: 0 0 16px; font-size: 18px; }
+
+  .input-group { margin-bottom: 14px; }
+  .input-group label {
+    display: block;
+    font-size: 13px;
+    color: var(--hint);
+    margin-bottom: 6px;
+  }
+  .input-group input {
+    width: 100%;
+    background: var(--card);
+    border: 1px solid #2a2a35;
+    border-radius: 12px;
+    padding: 14px;
+    color: var(--text);
+    font-size: 16px;
+  }
+
+  .primary-btn {
+    width: 100%;
+    background: var(--button);
+    color: var(--button-text);
+    border: none;
+    border-radius: 14px;
+    padding: 16px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 4px;
+  }
+
+  .secondary-btn {
+    width: 100%;
+    background: transparent;
+    color: var(--hint);
+    border: none;
+    padding: 12px;
+    font-size: 14px;
+    margin-top: 8px;
+  }
+
+  .status-msg {
+    font-size: 13px;
+    text-align: center;
+    margin-top: 10px;
+    min-height: 18px;
+  }
+  .status-msg.error { color: #ff6b6b; }
+  .status-msg.success { color: #4cd97b; }
+
+  .loading {
+    text-align: center;
+    color: var(--hint);
+    padding: 40px 0;
+  }
+</style>
+</head>
+<body>
+
+  <div class="balance-card">
+    <div class="balance-label">Общий баланс</div>
+    <div class="balance-amount" id="balanceAmount">—</div>
+    <div class="username-tag" id="usernameTag"></div>
+  </div>
+
+  <div class="actions">
+    <button class="action-btn" onclick="openSendModal()">
+      <span class="icon">↑</span>
+      Отправить
+    </button>
+    <button class="action-btn" onclick="openReceiveModal()">
+      <span class="icon">↓</span>
+      Получить
+    </button>
+    <button class="action-btn" onclick="loadHistory()">
+      <span class="icon">↻</span>
+      Обновить
+    </button>
+  </div>
+
+  <div class="section-title">Последние операции</div>
+  <div id="historyList">
+    <div class="loading">Загрузка...</div>
+  </div>
+
+  <!-- Модалка отправки -->
+  <div class="modal-overlay" id="sendModal">
+    <div class="modal">
+      <h3>Отправить деньги</h3>
+      <div class="input-group">
+        <label>Кому (username без @)</label>
+        <input type="text" id="sendTo" placeholder="friend" autocomplete="off" />
+      </div>
+      <div class="input-group">
+        <label>Сумма</label>
+        <input type="number" id="sendAmount" placeholder="$0.00" inputmode="decimal" />
+      </div>
+      <button class="primary-btn" onclick="submitSend()">Отправить</button>
+      <button class="secondary-btn" onclick="closeModal('sendModal')">Отмена</button>
+      <div class="status-msg" id="sendStatus"></div>
+    </div>
+  </div>
+
+  <!-- Модалка получения -->
+  <div class="modal-overlay" id="receiveModal">
+    <div class="modal">
+      <h3>Получить деньги</h3>
+      <p style="color: var(--hint); font-size: 14px; line-height: 1.5;">
+        Чтобы получить перевод, просто дайте отправителю свой username в Telegram:
+      </p>
+      <div class="input-group">
+        <input type="text" id="myUsernameDisplay" readonly style="text-align:center; font-size: 20px; font-weight: 600;" />
+      </div>
+      <button class="primary-btn" onclick="closeModal('receiveModal')">Понятно</button>
+    </div>
+  </div>
+
+<script>
+  const tg = window.Telegram.WebApp;
+  tg.ready();
+  tg.expand();
+
+  const initData = tg.initData;
+  let currentUsername = null;
+
+  async function loadMe() {
+    try {
+      const res = await fetch('/api/me?initData=' + encodeURIComponent(initData));
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      currentUsername = data.username;
+      document.getElementById('balanceAmount').textContent = '$' + Number(data.balance).toFixed(2);
+      document.getElementById('usernameTag').textContent = data.username ? '@' + data.username : 'Установите username в настройках Telegram';
+      document.getElementById('myUsernameDisplay').value = data.username ? '@' + data.username : 'нет username';
+    } catch (e) {
+      document.getElementById('balanceAmount').textContent = 'Ошибка';
+      console.error(e);
+    }
+  }
+
+  async function loadHistory() {
+    const list = document.getElementById('historyList');
+    list.innerHTML = '<div class="loading">Загрузка...</div>';
+
+    try {
+      const res = await fetch('/api/history?initData=' + encodeURIComponent(initData));
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      if (!data.history.length) {
+        list.innerHTML = '<div class="empty-state">Операций пока нет</div>';
+        return;
+      }
+
+      list.innerHTML = data.history.map(item => {
+        const sign = item.direction === 'out' ? '−' : '+';
+        const cls = item.direction === 'out' ? 'out' : 'in';
+        const who = item.direction === 'out'
+          ? 'Отправлено @' + (item.counterparty || '—')
+          : 'Получено от @' + (item.counterparty || '—');
+
+        return `
+          <div class="history-item">
+            <div class="left">
+              <div class="who">${who}</div>
+              <div class="when">${item.created_at}</div>
+            </div>
+            <div class="amount ${cls}">${sign}$${Number(item.amount).toFixed(2)}</div>
+          </div>
+        `;
+      }).join('');
+    } catch (e) {
+      list.innerHTML = '<div class="empty-state">Не удалось загрузить историю</div>';
+    }
+  }
+
+  function openSendModal() {
+    document.getElementById('sendStatus').textContent = '';
+    document.getElementById('sendTo').value = '';
+    document.getElementById('sendAmount').value = '';
+    document.getElementById('sendModal').classList.add('open');
+  }
+
+  function openReceiveModal() {
+    document.getElementById('receiveModal').classList.add('open');
+  }
+
+  function closeModal(id) {
+    document.getElementById(id).classList.remove('open');
+  }
+
+  async function submitSend() {
+    const to = document.getElementById('sendTo').value.trim();
+    const amount = document.getElementById('sendAmount').value.trim();
+    const statusEl = document.getElementById('sendStatus');
+
+    if (!to || !amount) {
+      statusEl.textContent = 'Заполните оба поля';
+      statusEl.className = 'status-msg error';
+      return;
+    }
+
+    statusEl.textContent = 'Отправка...';
+    statusEl.className = 'status-msg';
+
+    try {
+      const res = await fetch('/api/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData, to, amount }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error || 'Ошибка');
+
+      statusEl.textContent = 'Готово! ✅';
+      statusEl.className = 'status-msg success';
+
+      if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+
+      setTimeout(() => {
+        closeModal('sendModal');
+        loadMe();
+        loadHistory();
+      }, 700);
+    } catch (e) {
+      statusEl.textContent = e.message;
+      statusEl.className = 'status-msg error';
+      if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+    }
+  }
+
+  loadMe();
+  loadHistory();
+</script>
+
+</body>
+</html>
