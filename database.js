@@ -12,6 +12,8 @@ db.pragma('journal_mode = WAL');
 // Создаём таблицы, если их ещё нет.
 // users — хранит telegram_id, username и текущий баланс.
 // transactions — журнал всех переводов, чтобы показывать историю.
+// deposits — журнал пополнений через CryptoBot (крипта), со статусом,
+// чтобы один и тот же платёж нельзя было зачислить дважды.
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,6 +29,17 @@ db.exec(`
     amount REAL NOT NULL,
     comment TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS deposits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id TEXT UNIQUE NOT NULL,
+    telegram_id INTEGER NOT NULL,
+    asset TEXT NOT NULL,
+    amount REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    paid_at TEXT
   );
 `);
 
@@ -123,6 +136,55 @@ function addBalance(telegramId, amount) {
   db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?').run(amount, telegramId);
 }
 
+// ==================== ДЕПОЗИТЫ (пополнение через CryptoBot) ====================
+
+// Сохраняет созданный инвойс со статусом "pending" — до того, как он оплачен.
+// invoiceId — это ID, который вернул CryptoBot при создании инвойса.
+function createDeposit(invoiceId, telegramId, asset, amount) {
+  db.prepare(
+    'INSERT INTO deposits (invoice_id, telegram_id, asset, amount, status) VALUES (?, ?, ?, ?, ?)'
+  ).run(String(invoiceId), telegramId, asset, amount, 'pending');
+}
+
+function getDeposit(invoiceId) {
+  return db.prepare('SELECT * FROM deposits WHERE invoice_id = ?').get(String(invoiceId));
+}
+
+// Подтверждает оплату по вебхуку от CryptoBot.
+// Защищено от двойного зачисления: если депозит уже был отмечен
+// как "paid" ранее (например, вебхук пришёл повторно), баланс
+// второй раз не зачисляется.
+function confirmDeposit(invoiceId) {
+  const deposit = getDeposit(invoiceId);
+
+  if (!deposit) {
+    return { ok: false, error: 'Депозит не найден' };
+  }
+
+  if (deposit.status === 'paid') {
+    return { ok: false, alreadyProcessed: true };
+  }
+
+  const runConfirm = db.transaction(() => {
+    db.prepare(
+      "UPDATE deposits SET status = 'paid', paid_at = CURRENT_TIMESTAMP WHERE invoice_id = ?"
+    ).run(String(invoiceId));
+
+    db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?')
+      .run(deposit.amount, deposit.telegram_id);
+
+    const user = db.prepare('SELECT * FROM users WHERE telegram_id = ?').get(deposit.telegram_id);
+
+    db.prepare(
+      'INSERT INTO transactions (from_user_id, to_user_id, amount, comment) VALUES (NULL, ?, ?, ?)'
+    ).run(user.id, deposit.amount, `Пополнение (${deposit.asset} через CryptoBot)`);
+  });
+
+  runConfirm();
+
+  return { ok: true, telegramId: deposit.telegram_id, amount: deposit.amount, asset: deposit.asset };
+}
+
 module.exports = {
   getOrCreateUser,
   findByUsername,
@@ -130,4 +192,7 @@ module.exports = {
   transfer,
   getHistory,
   addBalance,
+  createDeposit,
+  getDeposit,
+  confirmDeposit,
 };

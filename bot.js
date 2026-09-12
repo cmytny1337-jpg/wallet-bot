@@ -1,6 +1,7 @@
 // bot.js
-// Главный файл. Тут описаны команды бота И веб-сервер для Mini App
-// (красивого интерфейса, который открывается прямо внутри Telegram).
+// Главный файл. Тут описаны команды бота, веб-сервер для Mini App
+// (красивого интерфейса, который открывается прямо внутри Telegram)
+// и приём пополнений реальной криптой через CryptoBot.
 
 require('dotenv').config();
 const path = require('path');
@@ -10,10 +11,65 @@ const { Telegraf, Markup } = require('telegraf');
 const db = require('./database');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const WEBAPP_URL = process.env.WEBAPP_URL; // ссылка на мини-апп, добавим её позже
+const WEBAPP_URL = process.env.WEBAPP_URL; // ссылка на мини-апп
+const CRYPTOBOT_TOKEN = process.env.CRYPTOBOT_TOKEN; // токен из @CryptoBot -> Crypto Pay -> Create App
+const BOT_USERNAME = process.env.BOT_USERNAME; // без @, нужен для кнопки "Назад в бота" после оплаты
+
+const CRYPTOBOT_API = 'https://pay.crypt.bot/api';
+const SUPPORTED_ASSETS = ['USDT', 'TON', 'BTC', 'ETH'];
 
 const bot = new Telegraf(BOT_TOKEN);
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+
+// ==================== ЧАСТЬ 0: CRYPTOBOT (пополнение) ====================
+
+// Обёртка над Crypto Pay API. Документация: https://help.crypt.bot/crypto-pay-api
+async function cryptoBotRequest(method, body) {
+  const res = await fetch(`${CRYPTOBOT_API}/${method}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN,
+    },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    throw new Error(data.error ? JSON.stringify(data.error) : 'CryptoBot API error');
+  }
+  return data.result;
+}
+
+// Создаёт инвойс на оплату и сохраняет его в базу со статусом "pending".
+async function createTopupInvoice(telegramId, asset, amount) {
+  const payload = {
+    asset,
+    amount: String(amount),
+    description: 'Пополнение кошелька',
+    payload: JSON.stringify({ telegram_id: telegramId }),
+    allow_comments: false,
+    allow_anonymous: false,
+    expires_in: 1800, // 30 минут на оплату
+  };
+  if (BOT_USERNAME) {
+    payload.paid_btn_name = 'callback';
+    payload.paid_btn_url = `https://t.me/${BOT_USERNAME}`;
+  }
+
+  const invoice = await cryptoBotRequest('createInvoice', payload);
+  db.createDeposit(invoice.invoice_id, telegramId, asset, Number(amount));
+  return invoice;
+}
+
+// Проверка подписи вебхука — чтобы никто посторонний не мог прислать
+// поддельное "оплачено" и накрутить себе баланс. Алгоритм из документации
+// CryptoBot: secret = sha256(токен), подпись = hmac_sha256(тело, secret).
+function verifyCryptoBotSignature(rawBody, signatureHeader) {
+  if (!CRYPTOBOT_TOKEN || !signatureHeader) return false;
+  const secret = crypto.createHash('sha256').update(CRYPTOBOT_TOKEN).digest();
+  const computed = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+  return computed === signatureHeader;
+}
 
 // ==================== ЧАСТЬ 1: ОБЫЧНЫЙ БОТ (команды) ====================
 
@@ -36,6 +92,7 @@ bot.start((ctx) => {
     `Команды:\n` +
     `/balance — посмотреть баланс\n` +
     `/send @username сумма — перевести деньги\n` +
+    `/topup ВАЛЮТА сумма — пополнить криптой (например: /topup USDT 10)\n` +
     `/history — последние операции\n\n` +
     `⚠️ Обязательное условие: у получателя должен быть публичный @username в Telegram, ` +
     `и он должен хотя бы раз написать этому боту /start.`,
@@ -90,6 +147,40 @@ bot.command('send', (ctx) => {
   }
 });
 
+bot.command('topup', async (ctx) => {
+  if (!CRYPTOBOT_TOKEN) {
+    return ctx.reply('Пополнение пока не настроено (нет CRYPTOBOT_TOKEN)');
+  }
+
+  const parts = ctx.message.text.split(' ').filter(Boolean);
+  if (parts.length !== 3) {
+    return ctx.reply(
+      `Использование: /topup ВАЛЮТА сумма\nНапример: /topup USDT 10\n\nДоступные валюты: ${SUPPORTED_ASSETS.join(', ')}`
+    );
+  }
+
+  const asset = parts[1].toUpperCase();
+  const amount = parseFloat(parts[2].replace(',', '.'));
+
+  if (!SUPPORTED_ASSETS.includes(asset)) {
+    return ctx.reply(`Неизвестная валюта. Доступные: ${SUPPORTED_ASSETS.join(', ')}`);
+  }
+  if (isNaN(amount) || amount <= 0) {
+    return ctx.reply('Сумма указана неверно');
+  }
+
+  try {
+    const invoice = await createTopupInvoice(ctx.from.id, asset, amount);
+    ctx.reply(
+      `Инвойс создан на ${amount} ${asset}. Нажмите кнопку ниже, чтобы оплатить:`,
+      Markup.inlineKeyboard([Markup.button.url('💳 Оплатить', invoice.pay_url)])
+    );
+  } catch (e) {
+    console.error('Ошибка создания инвойса:', e.message);
+    ctx.reply('Не удалось создать счёт на оплату. Попробуйте позже.');
+  }
+});
+
 bot.command('history', (ctx) => {
   const history = db.getHistory(ctx.from.id);
 
@@ -103,7 +194,8 @@ bot.command('history', (ctx) => {
     if (isOutgoing) {
       return `➖ $${t.amount.toFixed(2)} → @${t.receiver_username} (${t.created_at})`;
     } else {
-      return `➕ $${t.amount.toFixed(2)} ← @${t.sender_username} (${t.created_at})`;
+      const from = t.sender_username ? `@${t.sender_username}` : (t.comment || 'пополнение');
+      return `➕ $${t.amount.toFixed(2)} ← ${from} (${t.created_at})`;
     }
   });
 
@@ -129,7 +221,12 @@ bot.command('addbalance', (ctx) => {
 // ==================== ЧАСТЬ 2: ВЕБ-СЕРВЕР ДЛЯ MINI APP ====================
 
 const app = express();
-app.use(express.json());
+
+// Сохраняем "сырое" тело запроса — оно нужно для проверки подписи
+// вебхука от CryptoBot (подпись считается по точным исходным байтам).
+app.use(express.json({
+  verify: (req, res, buf) => { req.rawBody = buf; },
+}));
 
 // Отдаём страницу интерфейса
 app.get('/', (req, res) => {
@@ -137,9 +234,6 @@ app.get('/', (req, res) => {
 });
 
 // Проверка подлинности данных, которые прислал Telegram Mini App.
-// Это нужно, чтобы никто посторонний не мог подделать запрос и
-// притвориться другим пользователем. Алгоритм — официальный,
-// описан в документации Telegram для Mini Apps.
 function validateInitData(initData, botToken) {
   try {
     const urlParams = new URLSearchParams(initData);
@@ -162,7 +256,6 @@ function validateInitData(initData, botToken) {
   }
 }
 
-// Достаём из initData объект пользователя
 function getUserFromInitData(initData) {
   const params = new URLSearchParams(initData);
   return JSON.parse(params.get('user'));
@@ -199,7 +292,9 @@ app.get('/api/history', (req, res) => {
       amount: t.amount,
       created_at: t.created_at,
       direction: t.sender_username === tgUser.username ? 'out' : 'in',
-      counterparty: t.sender_username === tgUser.username ? t.receiver_username : t.sender_username,
+      counterparty: t.sender_username === tgUser.username
+        ? t.receiver_username
+        : (t.sender_username || t.comment || 'пополнение'),
     })),
   });
 });
@@ -234,6 +329,72 @@ app.post('/api/send', (req, res) => {
   res.json({ ok: true });
 });
 
+// GET /api/topup-assets — список валют, которые можно выбрать в мини-аппе
+app.get('/api/topup-assets', (req, res) => {
+  res.json({ assets: SUPPORTED_ASSETS, enabled: Boolean(CRYPTOBOT_TOKEN) });
+});
+
+// POST /api/topup — создаёт инвойс CryptoBot и возвращает ссылку на оплату
+app.post('/api/topup', async (req, res) => {
+  const { initData, asset, amount } = req.body;
+  if (!initData || !validateInitData(initData, BOT_TOKEN)) {
+    return res.status(401).json({ error: 'Не удалось подтвердить пользователя' });
+  }
+  if (!CRYPTOBOT_TOKEN) {
+    return res.status(400).json({ error: 'Пополнение пока не настроено' });
+  }
+
+  const tgUser = getUserFromInitData(initData);
+  db.getOrCreateUser(tgUser.id, tgUser.username);
+
+  const cleanAsset = String(asset || '').toUpperCase();
+  const parsedAmount = parseFloat(amount);
+
+  if (!SUPPORTED_ASSETS.includes(cleanAsset)) {
+    return res.status(400).json({ error: 'Неизвестная валюта' });
+  }
+  if (isNaN(parsedAmount) || parsedAmount <= 0) {
+    return res.status(400).json({ error: 'Сумма указана неверно' });
+  }
+
+  try {
+    const invoice = await createTopupInvoice(tgUser.id, cleanAsset, parsedAmount);
+    res.json({ ok: true, pay_url: invoice.pay_url });
+  } catch (e) {
+    console.error('Ошибка создания инвойса:', e.message);
+    res.status(500).json({ error: 'Не удалось создать счёт на оплату' });
+  }
+});
+
+// POST /webhook/cryptobot — сюда CryptoBot присылает уведомление об оплате.
+// Этот адрес нужно вписать в настройках приложения в @CryptoBot (Crypto Pay
+// -> My Apps -> ваше приложение -> Webhook). Полный адрес:
+// https://ваш-домен.up.railway.app/webhook/cryptobot
+app.post('/webhook/cryptobot', (req, res) => {
+  const signature = req.get('crypto-pay-api-signature');
+
+  if (!verifyCryptoBotSignature(req.rawBody, signature)) {
+    return res.status(401).send('bad signature');
+  }
+
+  // Отвечаем сразу 200, чтобы CryptoBot не повторял вебхук,
+  // а обработку делаем после ответа.
+  res.status(200).send('ok');
+
+  const update = req.body;
+  if (update.update_type !== 'invoice_paid') return;
+
+  const invoice = update.payload;
+  const result = db.confirmDeposit(invoice.invoice_id);
+
+  if (result.ok) {
+    bot.telegram.sendMessage(
+      result.telegramId,
+      `✅ Зачислено ${result.amount} ${result.asset}. Баланс пополнен.`
+    ).catch(() => {});
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Веб-сервер запущен на порту ${PORT} ✅`);
@@ -244,8 +405,6 @@ app.listen(PORT, () => {
 bot.launch().then(() => {
   console.log('Бот запущен ✅');
 
-  // Настраиваем кнопку меню (рядом с полем ввода сообщения),
-  // чтобы можно было в один тап открыть мини-апп
   if (WEBAPP_URL) {
     bot.telegram.setChatMenuButton({
       menu_button: {
