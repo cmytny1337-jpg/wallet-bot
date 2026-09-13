@@ -91,9 +91,10 @@ bot.start((ctx) => {
     `Это простой кошелёк внутри Telegram.\n\n` +
     `Команды:\n` +
     `/balance — посмотреть баланс\n` +
-    `/send @username сумма — перевести деньги\n` +
+    `/send @username сумма — перевести деньги (можно и по Telegram ID)\n` +
     `/topup ВАЛЮТА сумма — пополнить криптой (например: /topup USDT 10)\n` +
     `/history — последние операции\n\n` +
+    `🎁 Сейчас проходит розыгрыш $10 000 на 10 победителей — участвуйте: /giveaway\n\n` +
     `⚠️ Обязательное условие: у получателя должен быть публичный @username в Telegram, ` +
     `и он должен хотя бы раз написать этому боту /start.`,
     buttons.length ? Markup.inlineKeyboard(buttons) : undefined
@@ -119,26 +120,26 @@ bot.command('send', (ctx) => {
   const parts = ctx.message.text.split(' ').filter(Boolean);
 
   if (parts.length !== 3) {
-    return ctx.reply('Использование: /send @username сумма\nНапример: /send @friend 50');
+    return ctx.reply('Использование: /send @username_или_id сумма\nНапример: /send @friend 50\nили: /send 7402594843 50');
   }
 
-  let [, usernameRaw, amountRaw] = parts;
-  const username = usernameRaw.replace('@', '');
+  let [, identifierRaw, amountRaw] = parts;
+  const identifier = identifierRaw.replace('@', '');
   const amount = parseFloat(amountRaw.replace(',', '.'));
 
   if (isNaN(amount)) {
     return ctx.reply('Сумма указана неверно');
   }
 
-  const result = db.transfer(ctx.from.id, username, amount);
+  const result = db.transfer(ctx.from.id, identifier, amount);
 
   if (!result.ok) {
     return ctx.reply(`❌ ${result.error}`);
   }
 
-  ctx.reply(`✅ Отправлено $${amount.toFixed(2)} пользователю @${username}`);
+  const receiver = db.resolveRecipient(identifier);
+  ctx.reply(`✅ Отправлено $${amount.toFixed(2)} пользователю ${receiver.username ? '@' + receiver.username : receiver.telegram_id}`);
 
-  const receiver = db.findByUsername(username);
   if (receiver) {
     bot.telegram.sendMessage(
       receiver.telegram_id,
@@ -178,6 +179,46 @@ bot.command('topup', async (ctx) => {
   } catch (e) {
     console.error('Ошибка создания инвойса:', e.message);
     ctx.reply('Не удалось создать счёт на оплату. Попробуйте позже.');
+  }
+});
+
+const GIVEAWAY_WINNERS = 10;
+const GIVEAWAY_AMOUNT_EACH = 1000;
+
+bot.command('giveaway', (ctx) => {
+  const result = db.joinGiveaway(ctx.from.id);
+  const count = db.getGiveawayCount();
+
+  if (result.alreadyJoined) {
+    return ctx.reply(`Вы уже участвуете в розыгрыше 🎁\nВсего участников: ${count}`);
+  }
+
+  ctx.reply(
+    `🎁 Вы участвуете в розыгрыше!\n` +
+    `Разыгрывается $${GIVEAWAY_AMOUNT_EACH * GIVEAWAY_WINNERS} между ${GIVEAWAY_WINNERS} победителями (по $${GIVEAWAY_AMOUNT_EACH} каждому).\n\n` +
+    `Сейчас участников: ${count}`
+  );
+});
+
+bot.command('drawgiveaway', async (ctx) => {
+  if (!ADMIN_IDS.includes(String(ctx.from.id))) {
+    return ctx.reply('Команда недоступна');
+  }
+
+  const result = db.drawGiveaway(GIVEAWAY_WINNERS, GIVEAWAY_AMOUNT_EACH);
+
+  if (!result.ok) {
+    return ctx.reply(`Не удалось провести розыгрыш: ${result.error}`);
+  }
+
+  const lines = result.winners.map((w) => `@${w.username || w.telegramId} — $${w.amount}`);
+  ctx.reply(`🎉 Розыгрыш завершён!\n\n${lines.join('\n')}`);
+
+  for (const w of result.winners) {
+    bot.telegram.sendMessage(
+      w.telegramId,
+      `🎉 Поздравляем! Вы выиграли $${w.amount} в розыгрыше кошелька! Баланс уже зачислен.`
+    ).catch(() => {});
   }
 });
 
@@ -309,16 +350,16 @@ app.post('/api/send', (req, res) => {
   const tgUser = getUserFromInitData(initData);
   db.getOrCreateUser(tgUser.id, tgUser.username);
 
-  const cleanUsername = String(to || '').replace('@', '').trim();
+  const cleanIdentifier = String(to || '').replace('@', '').trim();
   const parsedAmount = parseFloat(amount);
 
-  const result = db.transfer(tgUser.id, cleanUsername, parsedAmount);
+  const result = db.transfer(tgUser.id, cleanIdentifier, parsedAmount);
 
   if (!result.ok) {
     return res.status(400).json({ error: result.error });
   }
 
-  const receiver = db.findByUsername(cleanUsername);
+  const receiver = db.resolveRecipient(cleanIdentifier);
   if (receiver) {
     bot.telegram.sendMessage(
       receiver.telegram_id,
@@ -327,6 +368,74 @@ app.post('/api/send', (req, res) => {
   }
 
   res.json({ ok: true });
+});
+
+// ==================== PIN-КОД (замок мини-аппа) ====================
+// Это экран блокировки внутри мини-аппа — как в обычных приложениях
+// банков. Он не заменяет проверку Telegram (initData всё ещё
+// обязателен для каждого запроса), а просто не даёт увидеть баланс
+// с первого взгляда, если кто-то возьмёт разблокированный телефон.
+
+app.get('/api/pin-status', (req, res) => {
+  const { initData } = req.query;
+  if (!initData || !validateInitData(initData, BOT_TOKEN)) {
+    return res.status(401).json({ error: 'Не удалось подтвердить пользователя' });
+  }
+  const tgUser = getUserFromInitData(initData);
+  db.getOrCreateUser(tgUser.id, tgUser.username);
+  res.json({ hasPin: db.hasPin(tgUser.id) });
+});
+
+app.post('/api/pin-set', (req, res) => {
+  const { initData, pin } = req.body;
+  if (!initData || !validateInitData(initData, BOT_TOKEN)) {
+    return res.status(401).json({ error: 'Не удалось подтвердить пользователя' });
+  }
+  if (!/^\d{6}$/.test(String(pin || ''))) {
+    return res.status(400).json({ error: 'PIN-код должен состоять из 6 цифр' });
+  }
+  const tgUser = getUserFromInitData(initData);
+  db.getOrCreateUser(tgUser.id, tgUser.username);
+  db.setPin(tgUser.id, pin);
+  res.json({ ok: true });
+});
+
+app.post('/api/pin-verify', (req, res) => {
+  const { initData, pin } = req.body;
+  if (!initData || !validateInitData(initData, BOT_TOKEN)) {
+    return res.status(401).json({ error: 'Не удалось подтвердить пользователя' });
+  }
+  const tgUser = getUserFromInitData(initData);
+  const ok = db.verifyPin(tgUser.id, pin);
+  res.json({ ok });
+});
+
+// ==================== РОЗЫГРЫШ (в мини-аппе) ====================
+
+app.get('/api/giveaway-status', (req, res) => {
+  const { initData } = req.query;
+  if (!initData || !validateInitData(initData, BOT_TOKEN)) {
+    return res.status(401).json({ error: 'Не удалось подтвердить пользователя' });
+  }
+  const tgUser = getUserFromInitData(initData);
+  db.getOrCreateUser(tgUser.id, tgUser.username);
+  res.json({
+    joined: db.hasJoinedGiveaway(tgUser.id),
+    count: db.getGiveawayCount(),
+    winners: GIVEAWAY_WINNERS,
+    amountEach: GIVEAWAY_AMOUNT_EACH,
+  });
+});
+
+app.post('/api/giveaway-join', (req, res) => {
+  const { initData } = req.body;
+  if (!initData || !validateInitData(initData, BOT_TOKEN)) {
+    return res.status(401).json({ error: 'Не удалось подтвердить пользователя' });
+  }
+  const tgUser = getUserFromInitData(initData);
+  db.getOrCreateUser(tgUser.id, tgUser.username);
+  const result = db.joinGiveaway(tgUser.id);
+  res.json({ ok: true, alreadyJoined: Boolean(result.alreadyJoined), count: db.getGiveawayCount() });
 });
 
 // GET /api/topup-assets — список валют, которые можно выбрать в мини-аппе
