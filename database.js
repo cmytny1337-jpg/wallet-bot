@@ -4,6 +4,7 @@
 // в одном файле (wallet.db) рядом с проектом. Ничего отдельно ставить не нужно.
 
 const Database = require('better-sqlite3');
+const crypto = require('crypto');
 const db = new Database('wallet.db');
 
 // Включаем проверку внешних ключей (для целостности данных)
@@ -41,7 +42,20 @@ db.exec(`
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     paid_at TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS giveaway_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER UNIQUE NOT NULL,
+    joined_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
 `);
+
+// Миграция: добавляем колонку pin_hash, если её ещё нет
+// (нужно, потому что таблица users уже могла существовать без неё)
+const userColumns = db.prepare("PRAGMA table_info(users)").all();
+if (!userColumns.some((c) => c.name === 'pin_hash')) {
+  db.exec('ALTER TABLE users ADD COLUMN pin_hash TEXT');
+}
 
 // Находит пользователя по его telegram_id.
 // Если пользователя ещё нет в базе — создаёт его с балансом 0.
@@ -66,6 +80,26 @@ function findByUsername(username) {
   return db.prepare('SELECT * FROM users WHERE username = ?').get(username);
 }
 
+// Ищет пользователя по telegram_id
+function findByTelegramId(telegramId) {
+  return db.prepare('SELECT * FROM users WHERE telegram_id = ?').get(telegramId);
+}
+
+// Универсальный поиск получателя: принимает либо @username, либо
+// числовой Telegram ID — определяет тип автоматически.
+// (Настоящего блокчейн-адреса тут нет — это внутренняя система,
+// поэтому переводы возможны только между пользователями этого бота.)
+function resolveRecipient(identifierRaw) {
+  const identifier = String(identifierRaw).trim().replace('@', '');
+
+  if (/^\d+$/.test(identifier)) {
+    const byId = findByTelegramId(Number(identifier));
+    if (byId) return byId;
+  }
+
+  return findByUsername(identifier);
+}
+
 // Возвращает баланс пользователя
 function getBalance(telegramId) {
   const user = db.prepare('SELECT balance FROM users WHERE telegram_id = ?').get(telegramId);
@@ -76,13 +110,13 @@ function getBalance(telegramId) {
 // Всё происходит в одной "транзакции" базы данных: либо обе
 // операции (списание и зачисление) проходят успешно, либо
 // откатываются обе — деньги никогда не "теряются" и не дублируются.
-function transfer(fromTelegramId, toUsername, amount) {
+function transfer(fromTelegramId, toIdentifier, amount) {
   if (amount <= 0) {
     return { ok: false, error: 'Сумма должна быть больше нуля' };
   }
 
   const sender = db.prepare('SELECT * FROM users WHERE telegram_id = ?').get(fromTelegramId);
-  const receiver = findByUsername(toUsername);
+  const receiver = resolveRecipient(toIdentifier);
 
   if (!receiver) {
     return { ok: false, error: 'Получатель не найден. Он должен хотя бы раз запустить бота (/start)' };
@@ -188,6 +222,8 @@ function confirmDeposit(invoiceId) {
 module.exports = {
   getOrCreateUser,
   findByUsername,
+  findByTelegramId,
+  resolveRecipient,
   getBalance,
   transfer,
   getHistory,
@@ -195,4 +231,101 @@ module.exports = {
   createDeposit,
   getDeposit,
   confirmDeposit,
+  joinGiveaway,
+  getGiveawayCount,
+  drawGiveaway,
+  hasJoinedGiveaway,
+  hasPin,
+  setPin,
+  verifyPin,
 };
+
+// ==================== PIN-КОД ====================
+// Это экран-замок для самого мини-аппа (как у обычных банковских
+// приложений) — он не заменяет и не усиливает защиту Telegram,
+// а просто не даёт открыть кошелёк с первого взгляда, если кто-то
+// возьмёт в руки уже разблокированный телефон.
+
+function hashPin(pin) {
+  return crypto.createHash('sha256').update(String(pin)).digest('hex');
+}
+
+function hasPin(telegramId) {
+  const user = findByTelegramId(telegramId);
+  return Boolean(user && user.pin_hash);
+}
+
+function setPin(telegramId, pin) {
+  db.prepare('UPDATE users SET pin_hash = ? WHERE telegram_id = ?').run(hashPin(pin), telegramId);
+}
+
+function verifyPin(telegramId, pin) {
+  const user = findByTelegramId(telegramId);
+  if (!user || !user.pin_hash) return false;
+  return user.pin_hash === hashPin(pin);
+}
+
+// ==================== РОЗЫГРЫШ ====================
+
+// Участие в розыгрыше — просто фиксируем telegram_id.
+// UNIQUE не даст записаться дважды.
+function joinGiveaway(telegramId) {
+  const already = db.prepare('SELECT 1 FROM giveaway_entries WHERE telegram_id = ?').get(telegramId);
+  if (already) {
+    return { ok: false, alreadyJoined: true };
+  }
+  db.prepare('INSERT INTO giveaway_entries (telegram_id) VALUES (?)').run(telegramId);
+  return { ok: true };
+}
+
+function getGiveawayCount() {
+  const row = db.prepare('SELECT COUNT(*) AS c FROM giveaway_entries').get();
+  return row.c;
+}
+
+function hasJoinedGiveaway(telegramId) {
+  return Boolean(db.prepare('SELECT 1 FROM giveaway_entries WHERE telegram_id = ?').get(telegramId));
+}
+
+// Проводит розыгрыш: случайно выбирает winnersCount участников,
+// начисляет каждому amountEach, записывает в историю операций,
+// и очищает список участников (чтобы можно было запустить новый розыгрыш).
+// Всё — одной атомарной транзакцией.
+function drawGiveaway(winnersCount, amountEach) {
+  const entries = db.prepare('SELECT telegram_id FROM giveaway_entries').all();
+
+  if (entries.length === 0) {
+    return { ok: false, error: 'Нет участников' };
+  }
+
+  // Перемешиваем и берём первых N (или всех, если участников меньше)
+  const shuffled = entries.slice();
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  const winners = shuffled.slice(0, Math.min(winnersCount, shuffled.length));
+
+  const runDraw = db.transaction(() => {
+    for (const w of winners) {
+      db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?')
+        .run(amountEach, w.telegram_id);
+
+      const user = db.prepare('SELECT * FROM users WHERE telegram_id = ?').get(w.telegram_id);
+
+      db.prepare(
+        'INSERT INTO transactions (from_user_id, to_user_id, amount, comment) VALUES (NULL, ?, ?, ?)'
+      ).run(user.id, amountEach, 'Выигрыш в розыгрыше');
+    }
+    db.prepare('DELETE FROM giveaway_entries').run();
+  });
+
+  runDraw();
+
+  const winnerUsers = winners.map((w) => {
+    const user = db.prepare('SELECT * FROM users WHERE telegram_id = ?').get(w.telegram_id);
+    return { telegramId: w.telegram_id, username: user.username, amount: amountEach };
+  });
+
+  return { ok: true, winners: winnerUsers };
+}
