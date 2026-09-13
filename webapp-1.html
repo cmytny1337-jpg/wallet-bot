@@ -222,6 +222,7 @@
     color:var(--text-dim); font-size:12px; font-weight:700; cursor:pointer;
   }
   .chip:active{ background:#1d1f31; }
+  .chip.selected{ background:linear-gradient(90deg, var(--violet), #8a6cf7); color:#fff; border-color:transparent; }
 
   .primary-btn{
     margin-top:auto;
@@ -285,9 +286,119 @@
   #toast.show{ opacity:1; transform:translate(-50%, 0); }
 
   .loading-dim{ opacity:.4; pointer-events:none; }
+
+  /* ---------- PIN lock ---------- */
+  #pin-lock{
+    position:fixed; inset:0; z-index:100;
+    background:var(--bg);
+    display:none;
+    flex-direction:column;
+    align-items:center;
+    padding:calc(48px + var(--safe-top)) 28px calc(28px + var(--safe-bottom));
+  }
+  #pin-lock.show{ display:flex; }
+  .pin-logo{
+    width:64px; height:64px; border-radius:20px;
+    background:linear-gradient(135deg, var(--violet), var(--cyan));
+    display:flex; align-items:center; justify-content:center;
+    margin-bottom:22px;
+  }
+  .pin-logo svg{ width:30px; height:30px; stroke:#fff; }
+  .pin-title{ font-size:19px; font-weight:800; margin-bottom:6px; text-align:center; }
+  .pin-subtitle{ font-size:13px; color:var(--text-dim); text-align:center; margin-bottom:34px; max-width:260px; }
+  .pin-dots{ display:flex; gap:16px; margin-bottom:40px; }
+  .pin-dot{
+    width:14px; height:14px; border-radius:50%;
+    border:1.5px solid var(--text-faint);
+    transition:background .12s ease, border-color .12s ease, transform .12s ease;
+  }
+  .pin-dot.filled{ background:var(--violet); border-color:var(--violet); }
+  .pin-dots.shake{ animation:shake .32s ease; }
+  @keyframes shake{
+    0%,100%{ transform:translateX(0); }
+    25%{ transform:translateX(-8px); }
+    75%{ transform:translateX(8px); }
+  }
+  .pin-keypad{
+    display:grid; grid-template-columns:repeat(3, 1fr);
+    gap:16px; width:100%; max-width:280px;
+  }
+  .pin-key{
+    aspect-ratio:1; border-radius:50%;
+    background:var(--surface); border:1px solid rgba(255,255,255,0.06);
+    color:var(--text); font-family:'Manrope', sans-serif;
+    font-size:22px; font-weight:700;
+    display:flex; align-items:center; justify-content:center;
+    cursor:pointer;
+  }
+  .pin-key:active{ background:#1d1f31; transform:scale(.95); }
+  .pin-key.ghost{ background:none; border:none; box-shadow:none; }
+  .pin-error{ color:var(--negative); font-size:13px; font-weight:600; margin-top:18px; min-height:18px; }
+  .pin-skip{
+    margin-top:26px; background:none; border:none;
+    color:var(--text-faint); font-size:13px; font-weight:600;
+    text-decoration:underline; cursor:pointer;
+  }
+
+  /* ---------- Giveaway banner ---------- */
+  .giveaway-card{
+    position:relative;
+    border-radius:var(--radius-md);
+    padding:16px 18px;
+    background:linear-gradient(120deg, rgba(110,92,245,.16), rgba(49,216,232,.10));
+    border:1px solid rgba(110,92,245,.28);
+    margin-bottom:22px;
+    display:flex; align-items:center; gap:14px;
+  }
+  .giveaway-card .emoji{ font-size:26px; line-height:1; flex-shrink:0; }
+  .giveaway-card .text{ flex:1; min-width:0; }
+  .giveaway-card .text .t1{ font-size:13.5px; font-weight:800; margin-bottom:2px; }
+  .giveaway-card .text .t2{ font-size:12px; color:var(--text-dim); }
+  .giveaway-card button{
+    flex-shrink:0;
+    border:none; border-radius:10px;
+    padding:9px 14px;
+    font-family:'Manrope', sans-serif; font-size:12.5px; font-weight:800;
+    color:#fff;
+    background:linear-gradient(90deg, var(--violet), #8a6cf7);
+    cursor:pointer;
+  }
+  .giveaway-card button.joined{ background:var(--surface); color:var(--text-dim); }
+  .giveaway-card button:disabled{ opacity:.7; }
 </style>
 </head>
 <body>
+
+<!-- ==================== PIN LOCK ==================== -->
+<div id="pin-lock">
+  <div class="pin-logo">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+  </div>
+  <div class="pin-title" id="pin-title">Введите PIN-код</div>
+  <div class="pin-subtitle" id="pin-subtitle">Разблокируйте кошелёк, чтобы продолжить</div>
+  <div class="pin-dots" id="pin-dots">
+    <div class="pin-dot"></div><div class="pin-dot"></div><div class="pin-dot"></div>
+    <div class="pin-dot"></div><div class="pin-dot"></div><div class="pin-dot"></div>
+  </div>
+  <div class="pin-keypad" id="pin-keypad">
+    <div class="pin-key" data-digit="1">1</div>
+    <div class="pin-key" data-digit="2">2</div>
+    <div class="pin-key" data-digit="3">3</div>
+    <div class="pin-key" data-digit="4">4</div>
+    <div class="pin-key" data-digit="5">5</div>
+    <div class="pin-key" data-digit="6">6</div>
+    <div class="pin-key" data-digit="7">7</div>
+    <div class="pin-key" data-digit="8">8</div>
+    <div class="pin-key" data-digit="9">9</div>
+    <div class="pin-key ghost"></div>
+    <div class="pin-key" data-digit="0">0</div>
+    <div class="pin-key ghost" id="pin-backspace">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;stroke:var(--text-dim)"><path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2Z"/><path d="m14 9-4 6"/><path d="m10 9 4 6"/></svg>
+    </div>
+  </div>
+  <div class="pin-error" id="pin-error"></div>
+  <button class="pin-skip" id="pin-skip">Пропустить пока что</button>
+</div>
 
 <div id="app">
 
@@ -306,6 +417,15 @@
       <div class="balance-user" id="balance-user">@—</div>
     </div>
 
+    <div class="giveaway-card" id="giveaway-card" style="display:none;">
+      <div class="emoji">🎁</div>
+      <div class="text">
+        <div class="t1" id="giveaway-title">Розыгрыш $10 000 на 10 победителей</div>
+        <div class="t2" id="giveaway-sub">Участников: 0</div>
+      </div>
+      <button id="giveaway-btn">Участвовать</button>
+    </div>
+
     <div class="actions">
       <button class="action" id="btn-goto-send">
         <span class="circle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg></span>
@@ -318,6 +438,10 @@
       <button class="action" id="btn-goto-history">
         <span class="circle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></span>
         <span>История</span>
+      </button>
+      <button class="action" id="btn-goto-topup">
+        <span class="circle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg></span>
+        <span>Пополнить</span>
       </button>
     </div>
 
@@ -344,8 +468,7 @@
     <div class="field">
       <label>Кому</label>
       <div class="input-wrap">
-        <span class="prefix">@</span>
-        <input type="text" id="input-username" placeholder="username" autocomplete="off" autocapitalize="off">
+        <input type="text" id="input-username" placeholder="@username или Telegram ID" autocomplete="off" autocapitalize="off">
       </div>
     </div>
 
@@ -396,6 +519,33 @@
     <div class="tx-list" id="tx-list-full"></div>
   </div>
 
+  <!-- ==================== TOPUP ==================== -->
+  <div class="screen" id="screen-topup">
+    <div class="back-row">
+      <button class="icon-btn" data-back>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+      </button>
+      <h1>Пополнить</h1>
+    </div>
+
+    <div class="error-banner" id="topup-error"></div>
+
+    <div class="field">
+      <label>Валюта</label>
+      <div class="chips" id="asset-chips"></div>
+    </div>
+
+    <div class="field">
+      <label>Сумма</label>
+      <div class="input-wrap">
+        <input type="text" inputmode="decimal" class="amount" id="input-topup-amount" placeholder="0.00">
+      </div>
+    </div>
+
+    <button class="primary-btn" id="btn-topup-confirm" disabled>Создать счёт на оплату</button>
+    <div class="hint">Откроется оплата через CryptoBot. После оплаты баланс зачислится автоматически — обычно в течение минуты.</div>
+  </div>
+
 </div>
 
 <div id="toast"></div>
@@ -418,7 +568,8 @@
     home: document.getElementById('screen-home'),
     send: document.getElementById('screen-send'),
     receive: document.getElementById('screen-receive'),
-    history: document.getElementById('screen-history')
+    history: document.getElementById('screen-history'),
+    topup: document.getElementById('screen-topup')
   };
 
   function showScreen(name){
@@ -447,6 +598,11 @@
   });
   document.getElementById('btn-goto-receive').addEventListener('click', function(){ showScreen('receive'); });
   document.getElementById('btn-goto-history').addEventListener('click', function(){ renderHistory(true); showScreen('history'); });
+  document.getElementById('btn-goto-topup').addEventListener('click', function(){
+    document.getElementById('topup-error').classList.remove('show');
+    showScreen('topup');
+    loadTopupAssets();
+  });
 
   function toast(msg){
     var el = document.getElementById('toast');
@@ -518,6 +674,7 @@
     document.getElementById('balance-user').textContent = '@' + (state.username || '—');
     document.getElementById('receive-handle').textContent = '@' + (state.username || '—');
     renderList(document.getElementById('tx-list-preview'), state.history, 5);
+    loadGiveaway();
   }
 
   function renderHistory(){
@@ -639,7 +796,265 @@
     });
   });
 
-  loadAll(false);
+  // ---------- Top up ----------
+  var selectedAsset = null;
+  var assetsLoaded = false;
+  var topupAmount = document.getElementById('input-topup-amount');
+  var topupBtn = document.getElementById('btn-topup-confirm');
+  var topupError = document.getElementById('topup-error');
+
+  function validateTopup(){
+    var a = parseFloat(topupAmount.value.replace(',', '.'));
+    topupBtn.disabled = !(selectedAsset && !isNaN(a) && a > 0);
+  }
+  topupAmount.addEventListener('input', function(){
+    this.value = this.value.replace(',', '.').replace(/[^0-9.]/g, '');
+    validateTopup();
+  });
+
+  function loadTopupAssets(){
+    if (assetsLoaded || MOCK) {
+      if (MOCK) renderAssetChips(['USDT', 'TON', 'BTC', 'ETH'], false);
+      return;
+    }
+    fetch('/api/topup-assets').then(function(r){ return r.json(); }).then(function(res){
+      assetsLoaded = true;
+      renderAssetChips(res.assets || [], res.enabled);
+    }).catch(function(){
+      renderAssetChips(['USDT', 'TON', 'BTC', 'ETH'], true);
+    });
+  }
+
+  function renderAssetChips(assets, enabled){
+    var wrap = document.getElementById('asset-chips');
+    wrap.innerHTML = '';
+    if (enabled === false) {
+      topupError.textContent = 'Пополнение пока не настроено';
+      topupError.classList.add('show');
+    }
+    assets.forEach(function(asset){
+      var chip = document.createElement('div');
+      chip.className = 'chip';
+      chip.textContent = asset;
+      chip.addEventListener('click', function(){
+        wrap.querySelectorAll('.chip').forEach(function(c){ c.classList.remove('selected'); });
+        chip.classList.add('selected');
+        selectedAsset = asset;
+        validateTopup();
+      });
+      wrap.appendChild(chip);
+    });
+  }
+
+  topupBtn.addEventListener('click', function(){
+    topupError.classList.remove('show');
+    var amount = parseFloat(topupAmount.value.replace(',', '.'));
+
+    if (MOCK) { toast('Откройте кошелёк внутри Telegram, чтобы пополнить'); return; }
+
+    topupBtn.disabled = true;
+    topupBtn.textContent = 'Создаём счёт…';
+
+    fetch('/api/topup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ initData: initData, asset: selectedAsset, amount: amount })
+    }).then(function(r){ return r.json(); }).then(function(res){
+      if (!res.ok) {
+        topupError.textContent = res.error || 'Не удалось создать счёт';
+        topupError.classList.add('show');
+        return;
+      }
+      if (tg && tg.openTelegramLink) {
+        tg.openTelegramLink(res.pay_url);
+      } else {
+        window.open(res.pay_url, '_blank');
+      }
+      toast('Открываем оплату…');
+    }).catch(function(){
+      topupError.textContent = 'Ошибка сети. Попробуйте ещё раз.';
+      topupError.classList.add('show');
+    }).finally(function(){
+      topupBtn.textContent = 'Создать счёт на оплату';
+      validateTopup();
+    });
+  });
+
+  // ---------- PIN lock ----------
+  var pinLock = document.getElementById('pin-lock');
+  var pinDotsWrap = document.getElementById('pin-dots');
+  var pinTitle = document.getElementById('pin-title');
+  var pinSubtitle = document.getElementById('pin-subtitle');
+  var pinError = document.getElementById('pin-error');
+  var pinSkipBtn = document.getElementById('pin-skip');
+  var pinEntry = '';
+  var pinMode = 'verify'; // verify | create | confirm
+  var pinFirstEntry = '';
+
+  function renderPinDots(){
+    var dots = pinDotsWrap.querySelectorAll('.pin-dot');
+    dots.forEach(function(d, i){ d.classList.toggle('filled', i < pinEntry.length); });
+  }
+
+  function pinShake(msg){
+    pinDotsWrap.classList.add('shake');
+    pinError.textContent = msg || 'Неверный PIN-код';
+    setTimeout(function(){ pinDotsWrap.classList.remove('shake'); }, 320);
+    setTimeout(function(){ pinEntry = ''; renderPinDots(); }, 200);
+  }
+
+  function openPinLock(mode){
+    pinMode = mode;
+    pinEntry = '';
+    pinFirstEntry = '';
+    pinError.textContent = '';
+    renderPinDots();
+    if (mode === 'create') {
+      pinTitle.textContent = 'Придумайте PIN-код';
+      pinSubtitle.textContent = 'Он будет запрашиваться при входе в кошелёк';
+      pinSkipBtn.style.display = 'block';
+    } else if (mode === 'confirm') {
+      pinTitle.textContent = 'Повторите PIN-код';
+      pinSubtitle.textContent = 'Введите те же 6 цифр ещё раз';
+      pinSkipBtn.style.display = 'none';
+    } else {
+      pinTitle.textContent = 'Введите PIN-код';
+      pinSubtitle.textContent = 'Разблокируйте кошелёк, чтобы продолжить';
+      pinSkipBtn.style.display = 'none';
+    }
+    pinLock.classList.add('show');
+  }
+
+  function closePinLock(){
+    pinLock.classList.remove('show');
+  }
+
+  document.getElementById('pin-keypad').addEventListener('click', function(e){
+    var key = e.target.closest('.pin-key');
+    if (!key || key.classList.contains('ghost') && key.id !== 'pin-backspace') return;
+
+    if (key.id === 'pin-backspace') {
+      pinEntry = pinEntry.slice(0, -1);
+      renderPinDots();
+      return;
+    }
+
+    var digit = key.getAttribute('data-digit');
+    if (digit == null || pinEntry.length >= 6) return;
+
+    pinEntry += digit;
+    renderPinDots();
+    pinError.textContent = '';
+
+    if (pinEntry.length === 6) {
+      handlePinComplete();
+    }
+  });
+
+  function handlePinComplete(){
+    if (pinMode === 'verify') {
+      if (MOCK) { closePinLock(); loadAll(false); return; }
+      fetch('/api/pin-verify', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: initData, pin: pinEntry })
+      }).then(function(r){ return r.json(); }).then(function(res){
+        if (res.ok) {
+          if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+          closePinLock();
+          loadAll(false);
+        } else {
+          if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+          pinShake('Неверный PIN-код');
+        }
+      }).catch(function(){ pinShake('Ошибка сети'); });
+    } else if (pinMode === 'create') {
+      pinFirstEntry = pinEntry;
+      pinEntry = '';
+      openPinLock('confirm');
+    } else if (pinMode === 'confirm') {
+      if (pinEntry !== pinFirstEntry) {
+        pinShake('PIN-коды не совпадают');
+        setTimeout(function(){ openPinLock('create'); }, 500);
+        return;
+      }
+      if (MOCK) { closePinLock(); loadAll(false); return; }
+      fetch('/api/pin-set', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: initData, pin: pinEntry })
+      }).then(function(r){ return r.json(); }).then(function(res){
+        if (res.ok) {
+          if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+          closePinLock();
+          loadAll(false);
+        } else {
+          pinShake(res.error || 'Не удалось сохранить PIN');
+        }
+      }).catch(function(){ pinShake('Ошибка сети'); });
+    }
+  }
+
+  pinSkipBtn.addEventListener('click', function(){
+    closePinLock();
+    loadAll(false);
+  });
+
+  function initPinGate(){
+    if (MOCK) { loadAll(false); return; }
+    fetch(apiUrl('/api/pin-status')).then(function(r){ return r.json(); }).then(function(res){
+      if (res.hasPin) {
+        openPinLock('verify');
+      } else {
+        openPinLock('create');
+      }
+    }).catch(function(){ loadAll(false); });
+  }
+
+  // ---------- Giveaway ----------
+  var giveawayCard = document.getElementById('giveaway-card');
+  var giveawayBtn = document.getElementById('giveaway-btn');
+  var giveawaySub = document.getElementById('giveaway-sub');
+  var giveawayTitle = document.getElementById('giveaway-title');
+
+  function loadGiveaway(){
+    if (MOCK) {
+      giveawayCard.style.display = 'flex';
+      giveawaySub.textContent = 'Демо-режим — откройте в Telegram';
+      return;
+    }
+    fetch(apiUrl('/api/giveaway-status')).then(function(r){ return r.json(); }).then(function(res){
+      if (res.error) return;
+      giveawayCard.style.display = 'flex';
+      giveawayTitle.textContent = 'Розыгрыш $' + (res.winners * res.amountEach).toLocaleString('ru-RU') + ' на ' + res.winners + ' победителей';
+      giveawaySub.textContent = 'Участников: ' + res.count;
+      if (res.joined) {
+        giveawayBtn.textContent = 'Вы участвуете';
+        giveawayBtn.classList.add('joined');
+        giveawayBtn.disabled = true;
+      } else {
+        giveawayBtn.textContent = 'Участвовать';
+        giveawayBtn.classList.remove('joined');
+        giveawayBtn.disabled = false;
+      }
+    }).catch(function(){});
+  }
+
+  giveawayBtn.addEventListener('click', function(){
+    if (MOCK) { toast('Откройте кошелёк внутри Telegram, чтобы участвовать'); return; }
+    giveawayBtn.disabled = true;
+    fetch('/api/giveaway-join', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ initData: initData })
+    }).then(function(r){ return r.json(); }).then(function(res){
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+      toast(res.alreadyJoined ? 'Вы уже участвуете' : 'Вы участвуете в розыгрыше! 🎁');
+      loadGiveaway();
+    }).catch(function(){
+      toast('Не удалось подключиться, попробуйте ещё раз');
+      giveawayBtn.disabled = false;
+    });
+  });
+
+  initPinGate();
 })();
 </script>
 
