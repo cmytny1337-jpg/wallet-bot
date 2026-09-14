@@ -48,6 +48,15 @@ db.exec(`
     telegram_id INTEGER UNIQUE NOT NULL,
     joined_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS withdrawals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL,
+    asset TEXT NOT NULL,
+    amount REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // Миграция: добавляем колонку pin_hash, если её ещё нет
@@ -55,6 +64,14 @@ db.exec(`
 const userColumns = db.prepare("PRAGMA table_info(users)").all();
 if (!userColumns.some((c) => c.name === 'pin_hash')) {
   db.exec('ALTER TABLE users ADD COLUMN pin_hash TEXT');
+}
+// real_balance — отдельный счётчик "сколько реально обеспечено настоящими
+// деньгами и может быть выведено". balance (общий баланс) может быть
+// больше — например, за счёт выигрыша в розыгрыше — но вывести можно
+// не больше, чем real_balance. Это не даёт превратить бота в схему,
+// где выплаты одним оплачиваются депозитами других.
+if (!userColumns.some((c) => c.name === 'real_balance')) {
+  db.exec('ALTER TABLE users ADD COLUMN real_balance REAL NOT NULL DEFAULT 0');
 }
 
 // Находит пользователя по его telegram_id.
@@ -133,8 +150,16 @@ function transfer(fromTelegramId, toIdentifier, amount) {
   // db.transaction гарантирует атомарность — это ключевой момент
   // для любой денежной операции.
   const runTransfer = db.transaction(() => {
-    db.prepare('UPDATE users SET balance = balance - ? WHERE id = ?').run(amount, sender.id);
-    db.prepare('UPDATE users SET balance = balance + ? WHERE id = ?').run(amount, receiver.id);
+    // Вместе с деньгами переезжает и их "реальная" часть — то есть если
+    // отправитель переводит деньги, реально внесённые через депозит,
+    // получатель тоже сможет их вывести. А если это были, например,
+    // деньги из розыгрыша — они и останутся невыводимыми у получателя.
+    const realMove = Math.min(amount, sender.real_balance);
+
+    db.prepare('UPDATE users SET balance = balance - ?, real_balance = real_balance - ? WHERE id = ?')
+      .run(amount, realMove, sender.id);
+    db.prepare('UPDATE users SET balance = balance + ?, real_balance = real_balance + ? WHERE id = ?')
+      .run(amount, realMove, receiver.id);
     db.prepare(
       'INSERT INTO transactions (from_user_id, to_user_id, amount) VALUES (?, ?, ?)'
     ).run(sender.id, receiver.id, amount);
@@ -204,8 +229,8 @@ function confirmDeposit(invoiceId) {
       "UPDATE deposits SET status = 'paid', paid_at = CURRENT_TIMESTAMP WHERE invoice_id = ?"
     ).run(String(invoiceId));
 
-    db.prepare('UPDATE users SET balance = balance + ? WHERE telegram_id = ?')
-      .run(deposit.amount, deposit.telegram_id);
+    db.prepare('UPDATE users SET balance = balance + ?, real_balance = real_balance + ? WHERE telegram_id = ?')
+      .run(deposit.amount, deposit.amount, deposit.telegram_id);
 
     const user = db.prepare('SELECT * FROM users WHERE telegram_id = ?').get(deposit.telegram_id);
 
@@ -225,12 +250,16 @@ module.exports = {
   findByTelegramId,
   resolveRecipient,
   getBalance,
+  getWithdrawable,
   transfer,
   getHistory,
   addBalance,
   createDeposit,
   getDeposit,
   confirmDeposit,
+  beginWithdrawal,
+  markWithdrawalSuccess,
+  markWithdrawalFailed,
   joinGiveaway,
   getGiveawayCount,
   drawGiveaway,
@@ -240,7 +269,75 @@ module.exports = {
   verifyPin,
 };
 
-// ==================== PIN-КОД ====================
+function getWithdrawable(telegramId) {
+  const user = db.prepare('SELECT real_balance FROM users WHERE telegram_id = ?').get(telegramId);
+  return user ? user.real_balance : 0;
+}
+
+// ==================== ВЫВОД СРЕДСТВ ====================
+// Вывести можно не больше, чем реально было внесено депозитами
+// (real_balance) — независимо от того, каким стал общий баланс за счёт
+// переводов или розыгрыша. Списание происходит сразу (чтобы нельзя
+// было вывести дважды), а если сам перевод через CryptoBot не удастся —
+// деньги возвращаются через markWithdrawalFailed.
+
+function beginWithdrawal(telegramId, asset, amount) {
+  if (amount <= 0) {
+    return { ok: false, error: 'Сумма должна быть больше нуля' };
+  }
+
+  const user = db.prepare('SELECT * FROM users WHERE telegram_id = ?').get(telegramId);
+  if (!user) {
+    return { ok: false, error: 'Пользователь не найден' };
+  }
+
+  if (user.real_balance < amount) {
+    return {
+      ok: false,
+      error: `Можно вывести не больше $${user.real_balance.toFixed(2)} — именно столько вы реально внесли депозитами. Остальное на балансе — внутренние начисления (например, из розыгрыша), их вывести нельзя.`,
+    };
+  }
+
+  let withdrawalId;
+  const runBegin = db.transaction(() => {
+    db.prepare('UPDATE users SET balance = balance - ?, real_balance = real_balance - ? WHERE id = ?')
+      .run(amount, amount, user.id);
+    const info = db.prepare(
+      'INSERT INTO withdrawals (telegram_id, asset, amount, status) VALUES (?, ?, ?, ?)'
+    ).run(telegramId, asset, amount, 'pending');
+    withdrawalId = info.lastInsertRowid;
+  });
+  runBegin();
+
+  return { ok: true, withdrawalId };
+}
+
+function markWithdrawalSuccess(withdrawalId) {
+  const withdrawal = db.prepare('SELECT * FROM withdrawals WHERE id = ?').get(withdrawalId);
+  if (!withdrawal) return;
+
+  const runFinish = db.transaction(() => {
+    db.prepare("UPDATE withdrawals SET status = 'paid' WHERE id = ?").run(withdrawalId);
+    const user = db.prepare('SELECT * FROM users WHERE telegram_id = ?').get(withdrawal.telegram_id);
+    db.prepare(
+      'INSERT INTO transactions (from_user_id, to_user_id, amount, comment) VALUES (?, NULL, ?, ?)'
+    ).run(user.id, withdrawal.amount, `Вывод (${withdrawal.asset} через CryptoBot)`);
+  });
+  runFinish();
+}
+
+// Если перевод через CryptoBot не удался — возвращаем деньги пользователю
+function markWithdrawalFailed(withdrawalId) {
+  const withdrawal = db.prepare('SELECT * FROM withdrawals WHERE id = ?').get(withdrawalId);
+  if (!withdrawal) return;
+
+  const runRefund = db.transaction(() => {
+    db.prepare("UPDATE withdrawals SET status = 'failed' WHERE id = ?").run(withdrawalId);
+    db.prepare('UPDATE users SET balance = balance + ?, real_balance = real_balance + ? WHERE telegram_id = ?')
+      .run(withdrawal.amount, withdrawal.amount, withdrawal.telegram_id);
+  });
+  runRefund();
+}
 // Это экран-замок для самого мини-аппа (как у обычных банковских
 // приложений) — он не заменяет и не усиливает защиту Telegram,
 // а просто не даёт открыть кошелёк с первого взгляда, если кто-то
