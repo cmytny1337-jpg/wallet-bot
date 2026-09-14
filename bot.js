@@ -332,6 +332,12 @@ app.use(express.json({
 
 // Отдаём страницу интерфейса
 app.get('/', (req, res) => {
+  // Telegram агрессивно кэширует файл мини-аппа на устройстве.
+  // Эти заголовки заставляют его каждый раз забирать свежую версию,
+  // а не показывать старую из кэша после обновления кода.
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
   res.sendFile(path.join(__dirname, 'webapp.html'));
 });
 
