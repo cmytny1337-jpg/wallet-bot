@@ -16,7 +16,11 @@ const CRYPTOBOT_TOKEN = process.env.CRYPTOBOT_TOKEN; // токен из @CryptoB
 const BOT_USERNAME = process.env.BOT_USERNAME; // без @, нужен для кнопки "Назад в бота" после оплаты
 
 const CRYPTOBOT_API = 'https://pay.crypt.bot/api';
-const SUPPORTED_ASSETS = ['USDT', 'TON', 'BTC', 'ETH'];
+// Только USDT: у неё курс стабильно ~$1, поэтому "занёс X USDT" = "зачислено X$"
+// без искажений. TON/BTC/ETH сильно колеблются в цене, а без отдельного
+// сервиса котировок посчитать их в долларах правильно нельзя — раньше
+// это могло привести к неверному зачислению баланса.
+const SUPPORTED_ASSETS = ['USDT'];
 
 const bot = new Telegraf(BOT_TOKEN);
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -61,6 +65,21 @@ async function createTopupInvoice(telegramId, asset, amount) {
   return invoice;
 }
 
+// Отправляет реальную крипту пользователю обратно на его аккаунт
+// CryptoBot — используется для вывода. spendId должен быть уникальным
+// для каждой попытки перевода (это ключ идемпотентности CryptoBot —
+// он не даст выполнить один и тот же перевод дважды, даже если запрос
+// случайно продублируется).
+async function cryptoBotTransfer(telegramId, asset, amount, spendId) {
+  return cryptoBotRequest('transfer', {
+    user_id: telegramId,
+    asset,
+    amount: String(amount),
+    spend_id: spendId,
+    comment: 'Вывод из кошелька',
+  });
+}
+
 // Проверка подписи вебхука — чтобы никто посторонний не мог прислать
 // поддельное "оплачено" и накрутить себе баланс. Алгоритм из документации
 // CryptoBot: secret = sha256(токен), подпись = hmac_sha256(тело, secret).
@@ -93,8 +112,10 @@ bot.start((ctx) => {
     `/balance — посмотреть баланс\n` +
     `/send @username сумма — перевести деньги (можно и по Telegram ID)\n` +
     `/topup ВАЛЮТА сумма — пополнить криптой (например: /topup USDT 10)\n` +
+    `/withdraw ВАЛЮТА сумма — вывести обратно в криптовалюту\n` +
     `/history — последние операции\n\n` +
-    `🎁 Сейчас проходит розыгрыш $10 000 на 10 победителей — участвуйте: /giveaway\n\n` +
+    `🎁 Сейчас проходит розыгрыш $10 000 на 10 победителей — участвуйте: /giveaway\n` +
+    `(выигрыш можно тратить внутри бота, но не вывести в крипту — вывести можно только то, что вы реально внесли пополнением)\n\n` +
     `⚠️ Обязательное условие: у получателя должен быть публичный @username в Telegram, ` +
     `и он должен хотя бы раз написать этому боту /start.`,
     buttons.length ? Markup.inlineKeyboard(buttons) : undefined
@@ -222,6 +243,45 @@ bot.command('drawgiveaway', async (ctx) => {
   }
 });
 
+bot.command('withdraw', async (ctx) => {
+  if (!CRYPTOBOT_TOKEN) {
+    return ctx.reply('Вывод пока не настроен (нет CRYPTOBOT_TOKEN)');
+  }
+
+  const parts = ctx.message.text.split(' ').filter(Boolean);
+  if (parts.length !== 3) {
+    const withdrawable = db.getWithdrawable(ctx.from.id);
+    return ctx.reply(
+      `Использование: /withdraw ВАЛЮТА сумма\nНапример: /withdraw USDT 10\n\nДоступно к выводу: $${withdrawable.toFixed(2)}`
+    );
+  }
+
+  const asset = parts[1].toUpperCase();
+  const amount = parseFloat(parts[2].replace(',', '.'));
+
+  if (!SUPPORTED_ASSETS.includes(asset)) {
+    return ctx.reply(`Неизвестная валюта. Доступные: ${SUPPORTED_ASSETS.join(', ')}`);
+  }
+  if (isNaN(amount) || amount <= 0) {
+    return ctx.reply('Сумма указана неверно');
+  }
+
+  const begin = db.beginWithdrawal(ctx.from.id, asset, amount);
+  if (!begin.ok) {
+    return ctx.reply(`❌ ${begin.error}`);
+  }
+
+  try {
+    await cryptoBotTransfer(ctx.from.id, asset, amount, `withdraw-${begin.withdrawalId}`);
+    db.markWithdrawalSuccess(begin.withdrawalId);
+    ctx.reply(`✅ $${amount.toFixed(2)} (${asset}) отправлено на ваш аккаунт CryptoBot.`);
+  } catch (e) {
+    console.error('Ошибка вывода:', e.message);
+    db.markWithdrawalFailed(begin.withdrawalId);
+    ctx.reply('❌ Не удалось выполнить вывод. Деньги возвращены на баланс. Попробуйте позже.');
+  }
+});
+
 bot.command('history', (ctx) => {
   const history = db.getHistory(ctx.from.id);
 
@@ -233,7 +293,8 @@ bot.command('history', (ctx) => {
   const lines = history.map((t) => {
     const isOutgoing = t.sender_username === myUsername;
     if (isOutgoing) {
-      return `➖ $${t.amount.toFixed(2)} → @${t.receiver_username} (${t.created_at})`;
+      const to = t.receiver_username ? `@${t.receiver_username}` : (t.comment || 'вывод');
+      return `➖ $${t.amount.toFixed(2)} → ${to} (${t.created_at})`;
     } else {
       const from = t.sender_username ? `@${t.sender_username}` : (t.comment || 'пополнение');
       return `➕ $${t.amount.toFixed(2)} ← ${from} (${t.created_at})`;
@@ -315,6 +376,7 @@ app.get('/api/me', (req, res) => {
   res.json({
     username: user.username,
     balance: user.balance,
+    withdrawable: user.real_balance,
   });
 });
 
@@ -334,7 +396,7 @@ app.get('/api/history', (req, res) => {
       created_at: t.created_at,
       direction: t.sender_username === tgUser.username ? 'out' : 'in',
       counterparty: t.sender_username === tgUser.username
-        ? t.receiver_username
+        ? (t.receiver_username || t.comment || 'вывод')
         : (t.sender_username || t.comment || 'пополнение'),
     })),
   });
@@ -472,6 +534,45 @@ app.post('/api/topup', async (req, res) => {
   } catch (e) {
     console.error('Ошибка создания инвойса:', e.message);
     res.status(500).json({ error: 'Не удалось создать счёт на оплату' });
+  }
+});
+
+// POST /api/withdraw — вывод реально внесённых средств обратно в крипту
+app.post('/api/withdraw', async (req, res) => {
+  const { initData, asset, amount } = req.body;
+  if (!initData || !validateInitData(initData, BOT_TOKEN)) {
+    return res.status(401).json({ error: 'Не удалось подтвердить пользователя' });
+  }
+  if (!CRYPTOBOT_TOKEN) {
+    return res.status(400).json({ error: 'Вывод пока не настроен' });
+  }
+
+  const tgUser = getUserFromInitData(initData);
+  db.getOrCreateUser(tgUser.id, tgUser.username);
+
+  const cleanAsset = String(asset || '').toUpperCase();
+  const parsedAmount = parseFloat(amount);
+
+  if (!SUPPORTED_ASSETS.includes(cleanAsset)) {
+    return res.status(400).json({ error: 'Неизвестная валюта' });
+  }
+  if (isNaN(parsedAmount) || parsedAmount <= 0) {
+    return res.status(400).json({ error: 'Сумма указана неверно' });
+  }
+
+  const begin = db.beginWithdrawal(tgUser.id, cleanAsset, parsedAmount);
+  if (!begin.ok) {
+    return res.status(400).json({ error: begin.error });
+  }
+
+  try {
+    await cryptoBotTransfer(tgUser.id, cleanAsset, parsedAmount, `withdraw-${begin.withdrawalId}`);
+    db.markWithdrawalSuccess(begin.withdrawalId);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Ошибка вывода:', e.message);
+    db.markWithdrawalFailed(begin.withdrawalId);
+    res.status(500).json({ error: 'Не удалось выполнить вывод. Деньги возвращены на баланс.' });
   }
 });
 
