@@ -329,7 +329,7 @@
     color:var(--text); font-family:'Manrope', sans-serif;
     font-size:22px; font-weight:700;
     display:flex; align-items:center; justify-content:center;
-    cursor:pointer;
+    cursor:pointer; touch-action:manipulation;
   }
   .pin-key:active{ background:#1d1f31; transform:scale(.95); }
   .pin-key.ghost{ background:none; border:none; box-shadow:none; }
@@ -409,7 +409,7 @@
     <div class="pin-key ghost"></div>
     <div class="pin-key" data-digit="0">0</div>
     <div class="pin-key ghost" id="pin-backspace">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;stroke:var(--text-dim)"><path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2Z"/><path d="m14 9-4 6"/><path d="m10 9 4 6"/></svg>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;stroke:var(--text-dim);pointer-events:none;"><path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2Z"/><path d="m14 9-4 6"/><path d="m10 9 4 6"/></svg>
     </div>
   </div>
   <div class="pin-error" id="pin-error"></div>
@@ -824,7 +824,7 @@
   // ---------- Top up / Withdraw ----------
   var selectedAsset = null;
   var assetsLoaded = false;
-  var topupMode = 'deposit'; // deposit | withdraw
+  var topupMode = 'deposit';
   var withdrawableAmount = 0;
   var topupAmount = document.getElementById('input-topup-amount');
   var topupBtn = document.getElementById('btn-topup-confirm');
@@ -956,7 +956,7 @@
     });
   });
 
-  // ---------- PIN lock ----------
+  // ---------- PIN lock FIXED ----------
   var pinLock = document.getElementById('pin-lock');
   var pinDotsWrap = document.getElementById('pin-dots');
   var pinTitle = document.getElementById('pin-title');
@@ -964,8 +964,9 @@
   var pinError = document.getElementById('pin-error');
   var pinSkipBtn = document.getElementById('pin-skip');
   var pinEntry = '';
-  var pinMode = 'verify'; // verify | create | confirm
+  var pinMode = 'verify';
   var pinFirstEntry = '';
+  var pinProcessing = false;
 
   function renderPinDots(){
     var dots = pinDotsWrap.querySelectorAll('.pin-dot');
@@ -976,13 +977,13 @@
     pinDotsWrap.classList.add('shake');
     pinError.textContent = msg || 'Неверный PIN-код';
     setTimeout(function(){ pinDotsWrap.classList.remove('shake'); }, 320);
-    setTimeout(function(){ pinEntry = ''; renderPinDots(); }, 200);
+    setTimeout(function(){ pinEntry = ''; renderPinDots(); pinProcessing = false; }, 200);
   }
 
   function openPinLock(mode){
     pinMode = mode;
     pinEntry = '';
-    pinFirstEntry = '';
+    pinProcessing = false;
     pinError.textContent = '';
     renderPinDots();
     if (mode === 'create') {
@@ -1003,17 +1004,22 @@
 
   function closePinLock(){
     pinLock.classList.remove('show');
+    pinProcessing = false;
   }
 
   document.getElementById('pin-keypad').addEventListener('click', function(e){
-    var key = e.target.closest('.pin-key');
-    if (!key || key.classList.contains('ghost') && key.id !== 'pin-backspace') return;
+    if (pinProcessing) return;
 
-    if (key.id === 'pin-backspace') {
+    var key = e.target.closest('.pin-key');
+    if (!key) return;
+
+    if (key.id === 'pin-backspace' || key.closest('#pin-backspace')) {
       pinEntry = pinEntry.slice(0, -1);
       renderPinDots();
       return;
     }
+
+    if (key.classList.contains('ghost')) return;
 
     var digit = key.getAttribute('data-digit');
     if (digit == null || pinEntry.length >= 6) return;
@@ -1023,7 +1029,10 @@
     pinError.textContent = '';
 
     if (pinEntry.length === 6) {
-      handlePinComplete();
+      pinProcessing = true;
+      setTimeout(function(){
+        handlePinComplete();
+      }, 100);
     }
   });
 
@@ -1045,7 +1054,6 @@
       }).catch(function(){ pinShake('Ошибка сети'); });
     } else if (pinMode === 'create') {
       pinFirstEntry = pinEntry;
-      pinEntry = '';
       openPinLock('confirm');
     } else if (pinMode === 'confirm') {
       if (pinEntry !== pinFirstEntry) {
