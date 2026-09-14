@@ -985,7 +985,7 @@
   function openPinLock(mode){
     pinMode = mode;
     pinEntry = '';
-    pinFirstEntry = '';
+    if (mode !== 'confirm') pinFirstEntry = '';
     pinError.textContent = '';
     renderPinDots();
     if (mode === 'create') {
